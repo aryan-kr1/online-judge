@@ -1,3 +1,4 @@
 node_modules/
 .env
 sandbox-lab/.tmp-runs/
+.DS_Store
