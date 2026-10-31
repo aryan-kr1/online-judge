@@ -5,55 +5,62 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
-const IMAGE = "python:3.12-slim";
+const PY_IMAGE = "python:3.12-slim";
+const CPP_IMAGE = "gcc:14";
+
 const MAX_STDOUT_BYTES = 1024 * 1024; // 1 MB
 const MAX_STDERR_BYTES = 64 * 1024; // 64 KB
 // Docker needs time to start the container, and that time is included in the
 // wall-clock timer. This grace keeps fast programs from failing the limit.
 const STARTUP_GRACE_MS = 1000;
 
+const COMPILE_LIMIT_MS = 10000;
+const COMPILE_MEMORY_MB = 512;
+const MAX_COMPILE_MESSAGE = 2000;
+
+// Temp folders for C++ runs. Kept inside the project so Docker can mount them.
+const WORK_ROOT = path.join(__dirname, ".tmp-runs");
+
+function newName() {
+  return "oj-run-" + crypto.randomBytes(6).toString("hex");
+}
+
 function removeContainer(name) {
   spawnSync("docker", ["rm", "-f", name], { stdio: "ignore" });
 }
 
-function runPython(codePath, inputPath, timeLimitMs = 1000, memoryMb = 256) {
+// Lockdown flags shared by every container.
+function baseFlags({ name, memoryMb, cpus, tmpfs }) {
+  return [
+    "run",
+    "-i",
+    "--name",
+    name,
+    "--network",
+    "none",
+    "--memory",
+    `${memoryMb}m`,
+    "--memory-swap",
+    `${memoryMb}m`,
+    "--cpus",
+    String(cpus),
+    "--pids-limit",
+    "64",
+    "--read-only",
+    "--tmpfs",
+    tmpfs,
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges",
+    "--user",
+    "65534:65534",
+  ];
+}
+
+// Runs one container and reports what happened. Knows nothing about languages.
+function dockerRun({ name, args, inputPath, timeoutMs, maxStdout, maxStderr }) {
   return new Promise((resolve) => {
-    const codeAbs = path.resolve(codePath);
-    const name = "oj-run-" + crypto.randomBytes(6).toString("hex");
-
-    const args = [
-      "run",
-      "-i",
-      "--name",
-      name,
-      "--network",
-      "none",
-      "--memory",
-      `${memoryMb}m`,
-      "--memory-swap",
-      `${memoryMb}m`,
-      "--cpus",
-      "0.5",
-      "--pids-limit",
-      "64",
-      "--read-only",
-      "--tmpfs",
-      "/tmp:size=16m,noexec",
-      "--cap-drop",
-      "ALL",
-      "--security-opt",
-      "no-new-privileges",
-      "--user",
-      "65534:65534",
-      "-e",
-      "PYTHONDONTWRITEBYTECODE=1",
-      "-v",
-      `${codeAbs}:/work/solution.py:ro`,
-      IMAGE,
-      "python",
-      "/work/solution.py",
-    ];
-
     const started = Date.now();
     const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
 
@@ -72,7 +79,7 @@ function runPython(codePath, inputPath, timeLimitMs = 1000, memoryMb = 256) {
     const timer = setTimeout(() => {
       timedOut = true;
       killContainer();
-    }, timeLimitMs + STARTUP_GRACE_MS);
+    }, timeoutMs);
 
     const finish = (result) => {
       if (finished) return;
@@ -84,7 +91,7 @@ function runPython(codePath, inputPath, timeLimitMs = 1000, memoryMb = 256) {
     child.stdout.on("data", (chunk) => {
       if (outputExceeded) return;
       outBytes += chunk.length;
-      if (outBytes > MAX_STDOUT_BYTES) {
+      if (outBytes > maxStdout) {
         outputExceeded = true;
         killContainer();
         return;
@@ -93,7 +100,7 @@ function runPython(codePath, inputPath, timeLimitMs = 1000, memoryMb = 256) {
     });
 
     child.stderr.on("data", (chunk) => {
-      if (errBytes >= MAX_STDERR_BYTES) return;
+      if (errBytes >= maxStderr) return;
       errBytes += chunk.length;
       errChunks.push(chunk);
     });
@@ -110,12 +117,14 @@ function runPython(codePath, inputPath, timeLimitMs = 1000, memoryMb = 256) {
 
     child.on("error", (e) => {
       finish({
-        status: "Internal Error",
-        reason: `could not start docker: ${e.message}`,
-        exitCode: null,
-        timeMs: Date.now() - started,
+        startError: e.message,
+        code: null,
         stdout: "",
         stderr: "",
+        timedOut: false,
+        outputExceeded: false,
+        oomKilled: false,
+        timeMs: Date.now() - started,
       });
     });
 
@@ -133,56 +142,232 @@ function runPython(codePath, inputPath, timeLimitMs = 1000, memoryMb = 256) {
       }
       removeContainer(name);
 
-      const stdout = Buffer.concat(outChunks).toString("utf8");
-      const stderr = Buffer.concat(errChunks).toString("utf8");
-
-      let status;
-      let reason = "";
-      if (timedOut) {
-        status = "Time Limit Exceeded";
-      } else if (outputExceeded) {
-        status = "Runtime Error";
-        reason = "output limit exceeded";
-      } else if (oomKilled) {
-        status = "Memory Limit Exceeded";
-      } else if (code === 125) {
-        status = "Internal Error";
-        reason = "docker failed to start the container";
-      } else if (code !== 0) {
-        status = "Runtime Error";
-        reason = `exit code ${code}`;
-      } else {
-        status = "OK"; // ran fine; comparing with expected output is the worker's job
-      }
-
-      finish({ status, reason, exitCode: code, timeMs, stdout, stderr });
+      finish({
+        startError: null,
+        code,
+        stdout: Buffer.concat(outChunks).toString("utf8"),
+        stderr: Buffer.concat(errChunks).toString("utf8").slice(0, maxStderr),
+        timedOut,
+        outputExceeded,
+        oomKilled,
+        timeMs,
+      });
     });
   });
 }
 
-module.exports = { runPython };
+function internalError(r, reason) {
+  return {
+    status: "Internal Error",
+    reason: reason || r.startError || "docker failed to start the container",
+    exitCode: r.code,
+    timeMs: r.timeMs,
+    stdout: "",
+    stderr: "",
+  };
+}
+
+// Turns a finished run container into a verdict.
+function verdictFromRun(r) {
+  if (r.startError) return internalError(r);
+
+  let status;
+  let reason = "";
+  if (r.timedOut) {
+    status = "Time Limit Exceeded";
+  } else if (r.outputExceeded) {
+    status = "Runtime Error";
+    reason = "output limit exceeded";
+  } else if (r.oomKilled) {
+    status = "Memory Limit Exceeded";
+  } else if (r.code === 125) {
+    return internalError(r);
+  } else if (r.code !== 0) {
+    status = "Runtime Error";
+    const signal = r.code > 128 ? ` (signal ${r.code - 128})` : "";
+    reason = `exit code ${r.code}${signal}`;
+  } else {
+    status = "OK"; // ran fine; comparing with expected output is the worker's job
+  }
+
+  return {
+    status,
+    reason,
+    exitCode: r.code,
+    timeMs: r.timeMs,
+    stdout: r.stdout,
+    stderr: r.stderr,
+  };
+}
+
+async function runPython(codePath, inputPath, timeLimitMs, memoryMb) {
+  const codeAbs = path.resolve(codePath);
+  const name = newName();
+  const args = [
+    ...baseFlags({ name, memoryMb, cpus: 0.5, tmpfs: "/tmp:size=16m,noexec" }),
+    "-e",
+    "PYTHONDONTWRITEBYTECODE=1",
+    "-v",
+    `${codeAbs}:/work/solution.py:ro`,
+    PY_IMAGE,
+    "python",
+    "/work/solution.py",
+  ];
+
+  const r = await dockerRun({
+    name,
+    args,
+    inputPath,
+    timeoutMs: timeLimitMs + STARTUP_GRACE_MS,
+    maxStdout: MAX_STDOUT_BYTES,
+    maxStderr: MAX_STDERR_BYTES,
+  });
+  return verdictFromRun(r);
+}
+
+// Compiles solution.cpp in dir. Returns null on success, or a failure result.
+async function compileCpp(dir) {
+  const name = newName();
+  const args = [
+    ...baseFlags({
+      name,
+      memoryMb: COMPILE_MEMORY_MB,
+      cpus: 1,
+      tmpfs: "/tmp:size=64m",
+    }),
+    "-v",
+    `${dir}:/work`,
+    CPP_IMAGE,
+    "g++",
+    "-O2",
+    "-std=c++17",
+    "-fmax-errors=5",
+    "-o",
+    "/work/solution",
+    "/work/solution.cpp",
+  ];
+
+  const r = await dockerRun({
+    name,
+    args,
+    inputPath: null,
+    timeoutMs: COMPILE_LIMIT_MS + STARTUP_GRACE_MS,
+    maxStdout: MAX_STDERR_BYTES,
+    maxStderr: MAX_STDERR_BYTES,
+  });
+
+  const fail = (reason) => ({
+    status: "Compilation Error",
+    reason,
+    exitCode: r.code,
+    timeMs: 0,
+    stdout: "",
+    stderr: r.stderr.slice(0, MAX_COMPILE_MESSAGE),
+  });
+
+  if (r.startError) return internalError(r);
+  if (r.timedOut) return fail("compile time limit exceeded");
+  if (r.outputExceeded) return fail("compiler output too large");
+  if (r.oomKilled) return fail("compiler out of memory");
+  if (r.code === 125) return internalError(r);
+  if (r.code !== 0) return fail("compiler error");
+  return null;
+}
+
+async function runCpp(codePath, inputPath, timeLimitMs, memoryMb) {
+  fs.mkdirSync(WORK_ROOT, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(WORK_ROOT, "run-"));
+  fs.chmodSync(dir, 0o777); // the compiler runs as an unprivileged user
+
+  try {
+    fs.copyFileSync(codePath, path.join(dir, "solution.cpp"));
+
+    const compileStart = Date.now();
+    const failure = await compileCpp(dir);
+    const compileMs = Date.now() - compileStart;
+    if (failure) return { ...failure, compileMs };
+
+    const name = newName();
+    const args = [
+      ...baseFlags({
+        name,
+        memoryMb,
+        cpus: 0.5,
+        tmpfs: "/tmp:size=16m,noexec",
+      }),
+      "-v",
+      `${dir}:/work:ro`,
+      CPP_IMAGE,
+      "/work/solution",
+    ];
+
+    const r = await dockerRun({
+      name,
+      args,
+      inputPath,
+      timeoutMs: timeLimitMs + STARTUP_GRACE_MS,
+      maxStdout: MAX_STDOUT_BYTES,
+      maxStderr: MAX_STDERR_BYTES,
+    });
+    return { ...verdictFromRun(r), compileMs };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function runCode({
+  language,
+  codePath,
+  inputPath,
+  timeLimitMs = 1000,
+  memoryMb = 256,
+}) {
+  if (language === "python") {
+    return runPython(codePath, inputPath, timeLimitMs, memoryMb);
+  }
+  if (language === "cpp") {
+    return runCpp(codePath, inputPath, timeLimitMs, memoryMb);
+  }
+  throw new Error(`unsupported language: ${language}`);
+}
+
+module.exports = { runCode };
 
 if (require.main === module) {
   const [codePath, inputPath, timeArg, memArg] = process.argv.slice(2);
   if (!codePath) {
     console.error(
-      "usage: node runner.js <code.py> [input.txt] [timeLimitMs] [memoryMb]",
+      "usage: node runner.js <code.py|code.cpp> [input.txt] [timeLimitMs] [memoryMb]",
     );
     process.exit(1);
   }
+
+  const ext = path.extname(codePath);
+  const language = ext === ".py" ? "python" : ext === ".cpp" ? "cpp" : null;
+  if (!language) {
+    console.error("file must end in .py or .cpp");
+    process.exit(1);
+  }
+
   const preview = (s) => (s.length > 300 ? s.slice(0, 300) + "...[cut]" : s);
-  runPython(
+  runCode({
+    language,
     codePath,
     inputPath,
-    Number(timeArg) || 1000,
-    Number(memArg) || 256,
-  ).then((r) => {
-    console.log(
-      JSON.stringify(
-        { ...r, stdout: preview(r.stdout), stderr: preview(r.stderr) },
-        null,
-        2,
-      ),
-    );
-  });
+    timeLimitMs: Number(timeArg) || 1000,
+    memoryMb: Number(memArg) || 256,
+  })
+    .then((r) => {
+      console.log(
+        JSON.stringify(
+          { ...r, stdout: preview(r.stdout), stderr: preview(r.stderr) },
+          null,
+          2,
+        ),
+      );
+    })
+    .catch((e) => {
+      console.error("runner crashed:", e.message);
+      process.exit(1);
+    });
 }
