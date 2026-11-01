@@ -3,6 +3,8 @@ import { useAuth } from "./auth.jsx";
 import Login from "./pages/Login.jsx";
 import Problems from "./pages/Problems.jsx";
 import Problem from "./pages/Problem.jsx";
+import Contests from "./pages/Contests.jsx";
+import Contest from "./pages/Contest.jsx";
 
 function Protected({ children }) {
   const { token } = useAuth();
@@ -18,6 +20,12 @@ export default function App() {
         <Link to="/" className="brand">
           Online Judge
         </Link>
+        {token && (
+          <nav className="nav">
+            <Link to="/">Problems</Link>
+            <Link to="/contests">Contests</Link>
+          </nav>
+        )}
         {token && (
           <button className="link" onClick={logout}>
             Log out
@@ -37,6 +45,30 @@ export default function App() {
           />
           <Route
             path="/problems/:slug"
+            element={
+              <Protected>
+                <Problem />
+              </Protected>
+            }
+          />
+          <Route
+            path="/contests"
+            element={
+              <Protected>
+                <Contests />
+              </Protected>
+            }
+          />
+          <Route
+            path="/contests/:id"
+            element={
+              <Protected>
+                <Contest />
+              </Protected>
+            }
+          />
+          <Route
+            path="/contests/:contestId/problems/:slug"
             element={
               <Protected>
                 <Problem />

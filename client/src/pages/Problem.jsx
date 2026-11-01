@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import CodeMirror from "@uiw/react-codemirror";
 import { python } from "@codemirror/lang-python";
 import { cpp } from "@codemirror/lang-cpp";
@@ -13,7 +13,8 @@ const STARTERS = {
 };
 
 export default function Problem() {
-  const { slug } = useParams();
+  // contestId is only present on /contests/:contestId/problems/:slug
+  const { slug, contestId } = useParams();
   const { token } = useAuth();
   const [problem, setProblem] = useState(null);
   const [error, setError] = useState("");
@@ -59,6 +60,7 @@ export default function Problem() {
           problem_id: problem.id,
           language,
           code: codes[language],
+          ...(contestId ? { contest_id: Number(contestId) } : {}),
         },
       });
       setSubmissionId(data.submission.id);
@@ -79,117 +81,124 @@ export default function Problem() {
     !["Time Limit Exceeded", "Accepted"].includes(live.status);
 
   return (
-    <div className="problem-layout">
-      <section className="card">
-        <h2>{problem.title}</h2>
-        <p className="meta">
-          <span className={`badge ${problem.difficulty}`}>
-            {problem.difficulty}
-          </span>{" "}
-          Time limit {problem.time_limit_ms} ms, memory limit{" "}
-          {problem.memory_limit_mb} MB
+    <>
+      {contestId && (
+        <p>
+          <Link to={`/contests/${contestId}`}>&larr; Back to contest</Link>
         </p>
-        <div className="statement">{problem.statement}</div>
-        {problem.sample_test_cases.map((t, i) => (
-          <div key={t.id} className="sample">
-            <h4>Sample {i + 1}</h4>
-            <div className="sample-grid">
-              <div>
-                <strong>Input</strong>
-                <pre>{t.input}</pre>
-              </div>
-              <div>
-                <strong>Output</strong>
-                <pre>{t.expected_output}</pre>
-              </div>
-            </div>
-          </div>
-        ))}
-      </section>
-
-      <section className="card">
-        <div className="editor-bar">
-          <select
-            value={language}
-            onChange={(e) => setLanguage(e.target.value)}
-            disabled={judging}
-          >
-            <option value="python">Python</option>
-            <option value="cpp">C++</option>
-          </select>
-          <button
-            onClick={submit}
-            disabled={judging || !codes[language].trim()}
-          >
-            {judging ? "Judging..." : "Submit"}
-          </button>
-        </div>
-
-        <CodeMirror
-          value={codes[language]}
-          height="360px"
-          extensions={extensions}
-          onChange={(value) => setCodes((c) => ({ ...c, [language]: value }))}
-        />
-
-        {submitError && <p className="error">{submitError}</p>}
-
-        {live && (
-          <div className={`verdict ${live.final ? "final" : ""}`}>
-            <div className="verdict-status">
-              {live.status}
-              {live.final &&
-              live.timeMs != null &&
-              live.status !== "Compilation Error"
-                ? ` (${live.timeMs} ms)`
-                : ""}
-            </div>
-            {!live.final && live.total > 0 && (
-              <>
-                <progress value={live.test} max={live.total} />
-                <div className="meta">
-                  Test {live.test} of {live.total}
+      )}
+      <div className="problem-layout">
+        <section className="card">
+          <h2>{problem.title}</h2>
+          <p className="meta">
+            <span className={`badge ${problem.difficulty}`}>
+              {problem.difficulty}
+            </span>{" "}
+            Time limit {problem.time_limit_ms} ms, memory limit{" "}
+            {problem.memory_limit_mb} MB
+          </p>
+          <div className="statement">{problem.statement}</div>
+          {problem.sample_test_cases.map((t, i) => (
+            <div key={t.id} className="sample">
+              <h4>Sample {i + 1}</h4>
+              <div className="sample-grid">
+                <div>
+                  <strong>Input</strong>
+                  <pre>{t.input}</pre>
                 </div>
-              </>
-            )}
-            {showMessage && <pre>{live.message}</pre>}
-          </div>
-        )}
+                <div>
+                  <strong>Output</strong>
+                  <pre>{t.expected_output}</pre>
+                </div>
+              </div>
+            </div>
+          ))}
+        </section>
 
-        <h4>My submissions</h4>
-        {history.length === 0 ? (
-          <p className="meta">No submissions yet.</p>
-        ) : (
-          <table className="history">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>When</th>
-                <th>Language</th>
-                <th>Verdict</th>
-                <th>Time</th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.map((s) => (
-                <tr key={s.id}>
-                  <td>{s.id}</td>
-                  <td>{new Date(s.created_at).toLocaleString()}</td>
-                  <td>{s.language === "cpp" ? "C++" : "Python"}</td>
-                  <td>
-                    <span
-                      className={`status ${s.status === "Accepted" ? "ok" : ""}`}
-                    >
-                      {s.status}
-                    </span>
-                  </td>
-                  <td>{s.time_ms != null ? `${s.time_ms} ms` : "-"}</td>
+        <section className="card">
+          <div className="editor-bar">
+            <select
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              disabled={judging}
+            >
+              <option value="python">Python</option>
+              <option value="cpp">C++</option>
+            </select>
+            <button
+              onClick={submit}
+              disabled={judging || !codes[language].trim()}
+            >
+              {judging ? "Judging..." : "Submit"}
+            </button>
+          </div>
+
+          <CodeMirror
+            value={codes[language]}
+            height="360px"
+            extensions={extensions}
+            onChange={(value) => setCodes((c) => ({ ...c, [language]: value }))}
+          />
+
+          {submitError && <p className="error">{submitError}</p>}
+
+          {live && (
+            <div className={`verdict ${live.final ? "final" : ""}`}>
+              <div className="verdict-status">
+                {live.status}
+                {live.final &&
+                live.timeMs != null &&
+                live.status !== "Compilation Error"
+                  ? ` (${live.timeMs} ms)`
+                  : ""}
+              </div>
+              {!live.final && live.total > 0 && (
+                <>
+                  <progress value={live.test} max={live.total} />
+                  <div className="meta">
+                    Test {live.test} of {live.total}
+                  </div>
+                </>
+              )}
+              {showMessage && <pre>{live.message}</pre>}
+            </div>
+          )}
+
+          <h4>My submissions</h4>
+          {history.length === 0 ? (
+            <p className="meta">No submissions yet.</p>
+          ) : (
+            <table className="history">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>When</th>
+                  <th>Language</th>
+                  <th>Verdict</th>
+                  <th>Time</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
-    </div>
+              </thead>
+              <tbody>
+                {history.map((s) => (
+                  <tr key={s.id}>
+                    <td>{s.id}</td>
+                    <td>{new Date(s.created_at).toLocaleString()}</td>
+                    <td>{s.language === "cpp" ? "C++" : "Python"}</td>
+                    <td>
+                      <span
+                        className={`status ${s.status === "Accepted" ? "ok" : ""}`}
+                      >
+                        {s.status}
+                      </span>
+                    </td>
+                    <td>{s.time_ms != null ? `${s.time_ms} ms` : "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+      </div>
+    </>
   );
 }
