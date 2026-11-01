@@ -65,3 +65,26 @@ CREATE INDEX IF NOT EXISTS idx_submissions_user ON submissions (user_id, created
 CREATE INDEX IF NOT EXISTS idx_submissions_problem ON submissions (problem_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions (status);
+CREATE TABLE IF NOT EXISTS contests (
+  id SERIAL PRIMARY KEY,
+  title VARCHAR(200) NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  starts_at TIMESTAMPTZ NOT NULL,
+  ends_at TIMESTAMPTZ NOT NULL,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (ends_at > starts_at)
+);
+
+CREATE TABLE IF NOT EXISTS contest_problems (
+  contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+  problem_id INTEGER NOT NULL REFERENCES problems(id) ON DELETE CASCADE,
+  label VARCHAR(2) NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (contest_id, problem_id),
+  UNIQUE (contest_id, label)
+);
+
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS contest_id INTEGER REFERENCES contests(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_submissions_contest ON submissions (contest_id, user_id, problem_id, created_at);
