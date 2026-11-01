@@ -8,6 +8,14 @@ const SLUG_RE = /^[a-z0-9-]+$/;
 const DIFFICULTIES = ["easy", "medium", "hard"];
 const MAX_INT = 2147483647;
 
+// A problem is hidden from non-admins while any contest containing it has not
+// started yet. Uses the alias "p" for the problems table.
+const NOT_IN_UPCOMING_CONTEST = `NOT EXISTS (
+  SELECT 1 FROM contest_problems cp
+  JOIN contests c ON c.id = cp.contest_id
+  WHERE cp.problem_id = p.id AND c.starts_at > now()
+)`;
+
 function parseId(value) {
   if (!/^\d+$/.test(value)) return null;
   const n = parseInt(value, 10);
@@ -82,12 +90,17 @@ function validateProblemFields(body, isCreate) {
   return { values };
 }
 
-// ---------- Public ----------
+// ---------- Logged-in users ----------
 
-router.get("/", async (req, res) => {
+router.get("/", authenticate, async (req, res) => {
+  const isAdmin = req.user.role === "admin";
+
   try {
     const result = await pool.query(
-      "SELECT id, slug, title, difficulty FROM problems ORDER BY created_at DESC, id DESC",
+      `SELECT p.id, p.slug, p.title, p.difficulty
+       FROM problems p
+       ${isAdmin ? "" : `WHERE ${NOT_IN_UPCOMING_CONTEST}`}
+       ORDER BY p.created_at DESC, p.id DESC`,
     );
     return res.json({ problems: result.rows });
   } catch (err) {
@@ -96,11 +109,16 @@ router.get("/", async (req, res) => {
   }
 });
 
-router.get("/:slug", async (req, res) => {
+router.get("/:slug", authenticate, async (req, res) => {
+  const isAdmin = req.user.role === "admin";
+
   try {
     const problemResult = await pool.query(
-      `SELECT id, slug, title, statement, difficulty, time_limit_ms, memory_limit_mb
-       FROM problems WHERE slug = $1`,
+      `SELECT p.id, p.slug, p.title, p.statement, p.difficulty,
+              p.time_limit_ms, p.memory_limit_mb
+       FROM problems p
+       WHERE p.slug = $1
+       ${isAdmin ? "" : `AND ${NOT_IN_UPCOMING_CONTEST}`}`,
       [req.params.slug],
     );
     const problem = problemResult.rows[0];
