@@ -1,3 +1,4 @@
+const { attachWebSocket } = require("./ws");
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
@@ -34,6 +35,7 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
+attachWebSocket(server);
