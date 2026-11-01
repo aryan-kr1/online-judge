@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS submissions (
       'Time Limit Exceeded',
       'Memory Limit Exceeded',
       'Runtime Error',
-      'Compilation Error'
+      'Compilation Error',
+      'Internal Error'
     )
   ),
   time_ms INTEGER,
