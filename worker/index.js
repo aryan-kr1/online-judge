@@ -4,7 +4,7 @@ const path = require("path");
 const { Worker } = require("bullmq");
 const IORedis = require("ioredis");
 const { Pool } = require("pg");
-const { runCode } = require("../sandbox-lab/runner");
+const { prepare } = require("../sandbox-lab/runner");
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const connection = new IORedis(process.env.REDIS_URL, {
@@ -62,6 +62,7 @@ async function judge(job) {
 
   await fs.mkdir(TMP_BASE, { recursive: true });
   const dir = await fs.mkdtemp(path.join(TMP_BASE, "job-"));
+  let prepared = null;
 
   try {
     await fs.chmod(dir, 0o755);
@@ -70,14 +71,25 @@ async function judge(job) {
     await fs.writeFile(codePath, sub.code);
     await fs.chmod(codePath, 0o644);
 
+    // Compile once per submission (C++); Python has nothing to compile.
+    const prep = await prepare({ language: sub.language, codePath });
+
+    if (prep.failure) {
+      if (prep.failure.status === "Internal Error") {
+        throw new Error(`sandbox failure: ${prep.failure.reason}`);
+      }
+      const message = clean(prep.failure.stderr, 2000);
+      await saveVerdict(sub.id, prep.failure.status, 0, message);
+      return { status: prep.failure.status, timeMs: 0 };
+    }
+    prepared = prep.prepared;
+
     let maxTime = 0;
 
     for (let i = 0; i < tests.length; i++) {
       await fs.writeFile(inputPath, tests[i].input);
 
-      const result = await runCode({
-        language: sub.language,
-        codePath,
+      const result = await prepared.run({
         inputPath,
         timeLimitMs: sub.time_limit_ms,
         memoryMb: sub.memory_limit_mb,
@@ -99,14 +111,10 @@ async function judge(job) {
         }
       } else {
         verdict = result.status;
-        if (result.status === "Compilation Error") {
-          message = clean(result.stderr, 2000);
-        } else {
-          message = clean(
-            `Test ${i + 1}: ${result.reason || ""}\n${result.stderr || ""}`,
-            2000,
-          );
-        }
+        message = clean(
+          `Test ${i + 1}: ${result.reason || ""}\n${result.stderr || ""}`,
+          2000,
+        );
       }
 
       if (verdict) {
@@ -124,6 +132,7 @@ async function judge(job) {
     await saveVerdict(sub.id, "Accepted", maxTime, null);
     return { status: "Accepted", timeMs: maxTime };
   } finally {
+    if (prepared) prepared.dispose();
     await fs.rm(dir, { recursive: true, force: true });
   }
 }

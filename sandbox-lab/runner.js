@@ -200,30 +200,48 @@ function verdictFromRun(r) {
   };
 }
 
-async function runPython(codePath, inputPath, timeLimitMs, memoryMb) {
-  const codeAbs = path.resolve(codePath);
-  const name = newName();
-  const args = [
-    ...baseFlags({ name, memoryMb, cpus: 0.5, tmpfs: "/tmp:size=16m,noexec" }),
-    "-e",
-    "PYTHONDONTWRITEBYTECODE=1",
-    "-v",
-    `${codeAbs}:/work/solution.py:ro`,
-    PY_IMAGE,
-    "python",
-    "/work/solution.py",
-  ];
+// ---------------------------------------------------------------------------
+// Python: nothing to compile, so "prepared" just remembers the file path.
+// ---------------------------------------------------------------------------
 
-  const r = await dockerRun({
-    name,
-    args,
-    inputPath,
-    timeoutMs: timeLimitMs + STARTUP_GRACE_MS,
-    maxStdout: MAX_STDOUT_BYTES,
-    maxStderr: MAX_STDERR_BYTES,
-  });
-  return verdictFromRun(r);
+function preparePython(codePath) {
+  const codeAbs = path.resolve(codePath);
+
+  const run = async ({ inputPath, timeLimitMs, memoryMb }) => {
+    const name = newName();
+    const args = [
+      ...baseFlags({
+        name,
+        memoryMb,
+        cpus: 0.5,
+        tmpfs: "/tmp:size=16m,noexec",
+      }),
+      "-e",
+      "PYTHONDONTWRITEBYTECODE=1",
+      "-v",
+      `${codeAbs}:/work/solution.py:ro`,
+      PY_IMAGE,
+      "python",
+      "/work/solution.py",
+    ];
+
+    const r = await dockerRun({
+      name,
+      args,
+      inputPath,
+      timeoutMs: timeLimitMs + STARTUP_GRACE_MS,
+      maxStdout: MAX_STDOUT_BYTES,
+      maxStderr: MAX_STDERR_BYTES,
+    });
+    return verdictFromRun(r);
+  };
+
+  return { prepared: { compileMs: undefined, run, dispose() {} } };
 }
+
+// ---------------------------------------------------------------------------
+// C++: compile once, then run the binary as many times as needed.
+// ---------------------------------------------------------------------------
 
 // Compiles solution.cpp in dir. Returns null on success, or a failure result.
 async function compileCpp(dir) {
@@ -274,10 +292,39 @@ async function compileCpp(dir) {
   return null;
 }
 
-async function runCpp(codePath, inputPath, timeLimitMs, memoryMb) {
+// Runs the already compiled binary in dir.
+async function runBinary(dir, { inputPath, timeLimitMs, memoryMb }) {
+  const name = newName();
+  const args = [
+    ...baseFlags({
+      name,
+      memoryMb,
+      cpus: 0.5,
+      tmpfs: "/tmp:size=16m,noexec",
+    }),
+    "-v",
+    `${dir}:/work:ro`,
+    CPP_IMAGE,
+    "/work/solution",
+  ];
+
+  const r = await dockerRun({
+    name,
+    args,
+    inputPath,
+    timeoutMs: timeLimitMs + STARTUP_GRACE_MS,
+    maxStdout: MAX_STDOUT_BYTES,
+    maxStderr: MAX_STDERR_BYTES,
+  });
+  return verdictFromRun(r);
+}
+
+async function prepareCpp(codePath) {
   fs.mkdirSync(WORK_ROOT, { recursive: true });
   const dir = fs.mkdtempSync(path.join(WORK_ROOT, "run-"));
   fs.chmodSync(dir, 0o777); // the compiler runs as an unprivileged user
+
+  const dispose = () => fs.rmSync(dir, { recursive: true, force: true });
 
   try {
     fs.copyFileSync(codePath, path.join(dir, "solution.cpp"));
@@ -285,36 +332,42 @@ async function runCpp(codePath, inputPath, timeLimitMs, memoryMb) {
     const compileStart = Date.now();
     const failure = await compileCpp(dir);
     const compileMs = Date.now() - compileStart;
-    if (failure) return { ...failure, compileMs };
 
-    const name = newName();
-    const args = [
-      ...baseFlags({
-        name,
-        memoryMb,
-        cpus: 0.5,
-        tmpfs: "/tmp:size=16m,noexec",
-      }),
-      "-v",
-      `${dir}:/work:ro`,
-      CPP_IMAGE,
-      "/work/solution",
-    ];
+    if (failure) {
+      dispose();
+      return { failure: { ...failure, compileMs } };
+    }
 
-    const r = await dockerRun({
-      name,
-      args,
-      inputPath,
-      timeoutMs: timeLimitMs + STARTUP_GRACE_MS,
-      maxStdout: MAX_STDOUT_BYTES,
-      maxStderr: MAX_STDERR_BYTES,
-    });
-    return { ...verdictFromRun(r), compileMs };
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    return {
+      prepared: {
+        compileMs,
+        run: (opts) => runBinary(dir, opts),
+        dispose,
+      },
+    };
+  } catch (err) {
+    dispose();
+    throw err;
   }
 }
 
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+// Compiles (C++) or just checks the language (Python), once per submission.
+// Returns { failure } (a Compilation Error or Internal Error result) or
+// { prepared } with:
+//   prepared.compileMs                      compile time (C++ only)
+//   prepared.run({ inputPath, timeLimitMs, memoryMb })  runs one test
+//   prepared.dispose()                      deletes temp files; always call it
+async function prepare({ language, codePath }) {
+  if (language === "python") return preparePython(codePath);
+  if (language === "cpp") return prepareCpp(codePath);
+  throw new Error(`unsupported language: ${language}`);
+}
+
+// One-shot helper: prepare, run a single test, dispose. Same result shape as before.
 async function runCode({
   language,
   codePath,
@@ -322,16 +375,20 @@ async function runCode({
   timeLimitMs = 1000,
   memoryMb = 256,
 }) {
-  if (language === "python") {
-    return runPython(codePath, inputPath, timeLimitMs, memoryMb);
+  const { failure, prepared } = await prepare({ language, codePath });
+  if (failure) return failure;
+
+  try {
+    const result = await prepared.run({ inputPath, timeLimitMs, memoryMb });
+    return prepared.compileMs !== undefined
+      ? { ...result, compileMs: prepared.compileMs }
+      : result;
+  } finally {
+    prepared.dispose();
   }
-  if (language === "cpp") {
-    return runCpp(codePath, inputPath, timeLimitMs, memoryMb);
-  }
-  throw new Error(`unsupported language: ${language}`);
 }
 
-module.exports = { runCode };
+module.exports = { runCode, prepare };
 
 if (require.main === module) {
   const [codePath, inputPath, timeArg, memArg] = process.argv.slice(2);
