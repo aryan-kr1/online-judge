@@ -8,6 +8,7 @@ const router = express.Router();
 const LANGUAGES = ["python", "cpp"];
 const MAX_CODE_BYTES = 100000;
 const MAX_INT = 2147483647;
+const HISTORY_LIMIT = 50;
 
 router.post("/", authenticate, async (req, res) => {
   const { problem_id, language, code } = req.body || {};
@@ -68,6 +69,67 @@ router.post("/", authenticate, async (req, res) => {
   }
 
   return res.status(201).json({ submission });
+});
+
+// My submissions, newest first. Optional filter: ?problem_id=N
+router.get("/", authenticate, async (req, res) => {
+  const params = [req.user.id];
+  let filter = "";
+
+  if (req.query.problem_id !== undefined) {
+    const raw = String(req.query.problem_id);
+    const problemId = Number(raw);
+    if (!/^\d+$/.test(raw) || problemId < 1 || problemId > MAX_INT) {
+      return res
+        .status(400)
+        .json({ error: "problem_id must be a positive integer" });
+    }
+    params.push(problemId);
+    filter = "AND s.problem_id = $2";
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT s.id, s.problem_id, p.slug AS problem_slug, p.title AS problem_title,
+              s.language, s.status, s.time_ms, s.created_at
+       FROM submissions s
+       JOIN problems p ON p.id = s.problem_id
+       WHERE s.user_id = $1 ${filter}
+       ORDER BY s.created_at DESC, s.id DESC
+       LIMIT ${HISTORY_LIMIT}`,
+      params,
+    );
+    return res.json({ submissions: result.rows });
+  } catch (err) {
+    console.error("List submissions error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// One of my submissions, including the code. Only the owner can read it.
+router.get("/:id", authenticate, async (req, res) => {
+  if (!/^\d+$/.test(req.params.id) || Number(req.params.id) > MAX_INT) {
+    return res.status(404).json({ error: "Submission not found" });
+  }
+  const id = Number(req.params.id);
+
+  try {
+    const result = await pool.query(
+      `SELECT s.id, s.problem_id, p.slug AS problem_slug, p.title AS problem_title,
+              s.language, s.code, s.status, s.time_ms, s.error_message, s.created_at
+       FROM submissions s
+       JOIN problems p ON p.id = s.problem_id
+       WHERE s.id = $1 AND s.user_id = $2`,
+      [id, req.user.id],
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Submission not found" });
+    }
+    return res.json({ submission: result.rows[0] });
+  } catch (err) {
+    console.error("Get submission error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 module.exports = router;

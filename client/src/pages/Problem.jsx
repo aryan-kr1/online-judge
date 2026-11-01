@@ -22,6 +22,7 @@ export default function Problem() {
   const [submissionId, setSubmissionId] = useState(null);
   const [submitError, setSubmitError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [history, setHistory] = useState([]);
 
   const live = useLiveSubmission(submissionId, token);
   const judging = submitting || (live && !live.final);
@@ -30,10 +31,22 @@ export default function Problem() {
     setProblem(null);
     setError("");
     setSubmissionId(null);
+    setHistory([]);
     api(`/api/problems/${slug}`)
       .then((data) => setProblem(data.problem))
       .catch((err) => setError(err.message));
   }, [slug]);
+
+  // Load my past submissions for this problem. Reload when a new one is
+  // created and again when its verdict becomes final.
+  const problemId = problem?.id;
+  const liveFinal = live?.final;
+  useEffect(() => {
+    if (!problemId) return;
+    api(`/api/submissions?problem_id=${problemId}`)
+      .then((data) => setHistory(data.submissions))
+      .catch(() => {});
+  }, [problemId, submissionId, liveFinal]);
 
   async function submit() {
     setSubmitError("");
@@ -124,7 +137,7 @@ export default function Problem() {
         {live && (
           <div className={`verdict ${live.final ? "final" : ""}`}>
             <div className="verdict-status">
-              {live.final ? live.status : live.status}
+              {live.status}
               {live.final &&
               live.timeMs != null &&
               live.status !== "Compilation Error"
@@ -141,6 +154,40 @@ export default function Problem() {
             )}
             {showMessage && <pre>{live.message}</pre>}
           </div>
+        )}
+
+        <h4>My submissions</h4>
+        {history.length === 0 ? (
+          <p className="meta">No submissions yet.</p>
+        ) : (
+          <table className="history">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>When</th>
+                <th>Language</th>
+                <th>Verdict</th>
+                <th>Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((s) => (
+                <tr key={s.id}>
+                  <td>{s.id}</td>
+                  <td>{new Date(s.created_at).toLocaleString()}</td>
+                  <td>{s.language === "cpp" ? "C++" : "Python"}</td>
+                  <td>
+                    <span
+                      className={`status ${s.status === "Accepted" ? "ok" : ""}`}
+                    >
+                      {s.status}
+                    </span>
+                  </td>
+                  <td>{s.time_ms != null ? `${s.time_ms} ms` : "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </section>
     </div>

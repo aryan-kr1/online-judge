@@ -175,3 +175,19 @@ progress {
   width: 100%;
   margin-top: 8px;
 }
+
+.history {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.history th,
+.history td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid #ddd;
+}
+.history .status.ok {
+  color: #1a7f37;
+  font-weight: 600;
+}
