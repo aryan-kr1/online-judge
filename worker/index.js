@@ -5,11 +5,13 @@ const { Worker } = require("bullmq");
 const IORedis = require("ioredis");
 const { Pool } = require("pg");
 const { prepare } = require("../sandbox-lab/runner");
+const { createLeaderboard } = require("../server/src/leaderboard");
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const connection = new IORedis(process.env.REDIS_URL, {
   maxRetriesPerRequest: null,
 });
+const leaderboard = createLeaderboard({ pool, redis: connection });
 
 const TMP_BASE = path.join(__dirname, ".tmp-judge");
 const EXT = { python: "py", cpp: "cpp" };
@@ -32,6 +34,18 @@ async function saveVerdict(id, status, timeMs, message) {
     "UPDATE submissions SET status = $1, time_ms = $2, error_message = $3 WHERE id = $4",
     [status, timeMs, message, id],
   );
+}
+
+// Never throws: a leaderboard problem must not fail (and re-judge) the job.
+async function refreshLeaderboard(submissionId) {
+  try {
+    await leaderboard.updateForSubmission(submissionId);
+  } catch (err) {
+    console.error(
+      `Leaderboard update failed for submission ${submissionId}:`,
+      err.message,
+    );
+  }
 }
 
 async function judge(job) {
@@ -80,6 +94,7 @@ async function judge(job) {
       }
       const message = clean(prep.failure.stderr, 2000);
       await saveVerdict(sub.id, prep.failure.status, 0, message);
+      await refreshLeaderboard(sub.id);
       return { status: prep.failure.status, timeMs: 0 };
     }
     prepared = prep.prepared;
@@ -119,6 +134,7 @@ async function judge(job) {
 
       if (verdict) {
         await saveVerdict(sub.id, verdict, maxTime, message);
+        await refreshLeaderboard(sub.id);
         return { status: verdict, timeMs: maxTime, failedTest: i + 1 };
       }
 
@@ -130,6 +146,7 @@ async function judge(job) {
     }
 
     await saveVerdict(sub.id, "Accepted", maxTime, null);
+    await refreshLeaderboard(sub.id);
     return { status: "Accepted", timeMs: maxTime };
   } finally {
     if (prepared) prepared.dispose();

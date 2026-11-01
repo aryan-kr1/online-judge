@@ -6,6 +6,7 @@ const authRoutes = require("./routes/auth");
 const problemRoutes = require("./routes/problems");
 const submissionRoutes = require("./routes/submissions");
 const contestRoutes = require("./routes/contests");
+const leaderboardRoutes = require("./routes/leaderboard");
 
 if (!process.env.JWT_SECRET) {
   console.error("JWT_SECRET is missing in .env");
@@ -19,6 +20,7 @@ app.use(cors());
 app.use("/api/problems", express.json({ limit: "10mb" }), problemRoutes);
 app.use("/api/submissions", express.json({ limit: "200kb" }), submissionRoutes);
 app.use("/api/contests", express.json({ limit: "100kb" }), contestRoutes);
+app.use("/api/contests", express.json({ limit: "100kb" }), leaderboardRoutes);
 app.use("/api/auth", express.json({ limit: "100kb" }), authRoutes);
 
 app.get("/api/health", (req, res) => {
